@@ -1,0 +1,8 @@
+[package]
+name = "queue"
+version = "0.1.0"
+authors = ["Aaron Probus <aprobus15@gmail.com>"]
+
+[dependencies]
+
+crc = "1.3.0"

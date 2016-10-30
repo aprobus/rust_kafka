@@ -1,5 +1,3 @@
-extern crate crc;
-
 use std::fs::File;
 use std::mem;
 use std::io::prelude::*;
@@ -12,26 +10,26 @@ const PAYLOAD_OFFSET: usize = 9; // 9 - ??
 
 const NUM_HEADER_BYTES: usize = 9; // crc(4) + length(4) + type(1)
 
-fn main() {
-    let mut buffer = Vec::with_capacity(256);
-    for _ in 0..buffer.capacity() {
-        buffer.push(0);
-    }
+//fn main() {
+    //let mut buffer = Vec::with_capacity(256);
+    //for _ in 0..buffer.capacity() {
+        //buffer.push(0);
+    //}
 
-    {
-        let mut f = File::create("foo.txt").unwrap();
-        let payload: Vec<u8> = vec!(8, 1, 3);
-        write_payload(&mut f, &mut buffer, &payload,);
-    }
+    //{
+        //let mut f = File::create("foo.txt").unwrap();
+        //let payload: Vec<u8> = vec!(8, 1, 3);
+        //write_payload(&mut f, &mut buffer, &payload,);
+    //}
 
-    {
-        let mut f = File::open("foo.txt").unwrap();
-        let payload = read_payload(&mut f, &mut buffer);
-        println!("Resulting payload: {:?}", payload);
-    }
+    //{
+        //let mut f = File::open("foo.txt").unwrap();
+        //let payload = read_payload(&mut f, &mut buffer);
+        //println!("Resulting payload: {:?}", payload);
+    //}
 
-    println!("Hello world");
-}
+    //println!("Hello world");
+//}
 
 #[derive(Copy, Clone)]
 enum ChunkType {
@@ -107,7 +105,6 @@ fn write_chunk(file: &mut File, buffer: &mut Vec<u8>, payload: &[u8], chunk_inde
 
     let record_crc = calculate_crc(buffer);
     write_u32(buffer, record_crc, CRC_OFFSET);
-    println!("Digest: {}", record_crc);
 
     file.write_all(&buffer).expect("Failed to write");
 }
@@ -132,7 +129,7 @@ fn read_chunk(payload: &mut Vec<u8>, file: &mut File, buffer: &mut Vec<u8>) -> R
         return Result::Err("Unable to read from file")
     }
 
-    let expected_crc: u32 = read_u32(&buffer, CRC_OFFSET);
+    let expected_crc: u32 = read_u32(&buffer, CRC_OFFSET).unwrap();
     write_u32(buffer, 0, CRC_OFFSET);
     let actual_crc = calculate_crc(buffer);
 
@@ -140,7 +137,7 @@ fn read_chunk(payload: &mut Vec<u8>, file: &mut File, buffer: &mut Vec<u8>) -> R
         return Result::Err("CRC did not much expected value")
     }
 
-    let chunk_len = read_u32(&buffer, LEN_OFFSET) as usize;
+    let chunk_len = read_u32(&buffer, LEN_OFFSET).unwrap() as usize;
     let chunk_type = ChunkType::from_byte(buffer[TYPE_OFFSET]);
 
     payload.reserve(chunk_len);
@@ -151,31 +148,85 @@ fn read_chunk(payload: &mut Vec<u8>, file: &mut File, buffer: &mut Vec<u8>) -> R
     Result::Ok(chunk_type)
 }
 
-fn read_u32(buffer: &Vec<u8>, start: usize) -> u32 {
+pub fn read_u32(buffer: &Vec<u8>, index: usize) -> Result<u32, &'static str> {
     let size = mem::size_of::<u32>();
 
+    if index + size > buffer.len() {
+        return Result::Err("Not enough readable bytes")
+    }
+
     let mut result: u32 = 0;
-    for i in start..(start + size) {
+    for i in index..(index + size) {
         let next_byte: u32 = buffer[i] as u32;
         result = (result >> 8) | (next_byte << 24);
     }
 
-    result
+    Result::Ok(result)
 }
 
-fn write_u32(buffer: &mut Vec<u8>, x: u32, index: usize) {
+pub fn write_u32(buffer: &mut Vec<u8>, x: u32, index: usize) -> Result<(), &'static str> {
     let size = mem::size_of::<u32>();
 
+    if index + size > buffer.len() {
+        return Result::Err("Not enough space to write")
+    }
+
     let mut x_remain = x;
-    for i in 0..size {
+    for i in index..(index + size) {
         let byte = x_remain as u8;
-        buffer[index + i] = byte;
+        buffer[i] = byte;
         x_remain = x_remain >> 8;
     }
+
+    Result::Ok(())
 }
 
 fn calculate_crc(payload: &Vec<u8>) -> u32 {
     let mut digest = crc32::Digest::new(crc32::IEEE);
     digest.write(&payload);
     digest.sum32()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_u32 () {
+        let mut items: Vec<u8> = vec![0; 4];
+        write_u32(&mut items, 1, 0);
+        assert_eq!(items, vec!(1, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_write_u32_with_overflow () {
+        let mut items: Vec<u8> = vec![0; 4];
+        let result = write_u32(&mut items, 1, 2);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_u32 () {
+        let mut items: Vec<u8> = vec![1, 0, 0, 0];
+        let result = read_u32(&mut items, 0).unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_read_u32_with_overflow () {
+        let mut items: Vec<u8> = vec![1, 0, 0, 0];
+        let result = read_u32(&mut items, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_write_read_u32_cycle () {
+        let mut items: Vec<u8> = vec![0, 0, 0, 0, 0, 0];
+
+        write_u32(&mut items, 45, 2).expect("Should work");
+
+        let result = read_u32(&mut items, 2).unwrap();
+        assert_eq!(result, 45);
+    }
 }

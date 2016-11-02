@@ -1,7 +1,21 @@
 use std::fs::File;
 use std::mem;
+use std::path::PathBuf;
+use std::path::Path;
 use std::io::prelude::*;
 use crc::{crc32, Hasher32};
+
+pub struct Segment {
+    path: PathBuf,
+    pub offset: usize
+}
+
+impl Segment {
+    pub fn new(path: &Path, offset: usize) -> Segment {
+        let path_buf = path.to_path_buf();
+        Segment { path: path_buf, offset: offset }
+    }
+}
 
 const CRC_OFFSET: usize = 0;     // 0-3
 const LEN_OFFSET: usize = 4;     // 4-7
@@ -51,7 +65,7 @@ impl ChunkType {
     }
 }
 
-fn write_payload(file: &mut File, buffer: &mut Vec<u8>, payload: &Vec<u8>) {
+pub fn write_payload(file: &mut File, buffer: &mut Vec<u8>, payload: &[u8]) {
     let num_payload_bytes_per_chunk = buffer.capacity() - NUM_HEADER_BYTES;
 
     // 1. Exact

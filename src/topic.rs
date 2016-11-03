@@ -5,12 +5,12 @@ use std::fs::File;
 use std::io;
 
 use segment::Segment;
-use segment::write_payload;
 
 pub struct Topic {
     dir: PathBuf,
     segments: Vec<Segment>,
-    buffer: Vec<u8>
+    buffer: Vec<u8>,
+    current_segment: Option<Segment>
 }
 
 impl Topic {
@@ -40,24 +40,24 @@ impl Topic {
 
         let buffer = vec![0; 256];
 
-        let topic = Topic { dir: path_buf, segments: segments, buffer: buffer };
+        let topic = Topic { dir: path_buf, segments: segments, buffer: buffer, current_segment: None };
         Ok(topic)
     }
 
     pub fn produce(&mut self, message: &[u8]) -> Result<(), &'static str> {
-        let next_offset = self.segments.last().map(|segment| segment.offset + 1).unwrap_or(0);
+        if self.current_segment.is_none() {
+            let next_offset = self.segments.last().map(|segment| segment.offset + 1).unwrap_or(0);
 
-        let mut path = PathBuf::from(&self.dir);
-        path.push(format!("segment_{:09}", next_offset));
+            let mut path = PathBuf::from(&self.dir);
+            path.push(format!("segment_{:09}", next_offset));
 
-        let segment = Segment::new(&path, next_offset);
-        self.segments.push(segment);
+            let segment = Segment::new(&path, next_offset);
+            self.current_segment = Some(segment);
+        }
 
-        let mut file = File::create(path).unwrap();
+        let mut segment = self.current_segment.as_mut().unwrap();
+        segment.append(&mut self.buffer, message);
 
-        write_payload(&mut file, &mut self.buffer, message);
-
-        println!("Next offset: {}", next_offset);
         Ok(())
     }
 }

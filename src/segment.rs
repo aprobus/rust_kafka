@@ -7,13 +7,24 @@ use crc::{crc32, Hasher32};
 
 pub struct Segment {
     path: PathBuf,
-    pub offset: usize
+    pub offset: usize,
+    file: Option<File>
 }
 
 impl Segment {
     pub fn new(path: &Path, offset: usize) -> Segment {
         let path_buf = path.to_path_buf();
-        Segment { path: path_buf, offset: offset }
+        Segment { path: path_buf, offset: offset, file: None }
+    }
+
+    pub fn append(&mut self, buffer: &mut Vec<u8>, payload: &[u8]) {
+        if self.file.is_none() {
+            let file = File::create(&self.path).unwrap();
+            self.file = Some(file);
+        }
+
+        let file = self.file.as_mut().unwrap();
+        write_payload(file, buffer, payload);
     }
 }
 
@@ -23,27 +34,6 @@ const TYPE_OFFSET: usize = 8;    // 8
 const PAYLOAD_OFFSET: usize = 9; // 9 - ??
 
 const NUM_HEADER_BYTES: usize = 9; // crc(4) + length(4) + type(1)
-
-//fn main() {
-    //let mut buffer = Vec::with_capacity(256);
-    //for _ in 0..buffer.capacity() {
-        //buffer.push(0);
-    //}
-
-    //{
-        //let mut f = File::create("foo.txt").unwrap();
-        //let payload: Vec<u8> = vec!(8, 1, 3);
-        //write_payload(&mut f, &mut buffer, &payload,);
-    //}
-
-    //{
-        //let mut f = File::open("foo.txt").unwrap();
-        //let payload = read_payload(&mut f, &mut buffer);
-        //println!("Resulting payload: {:?}", payload);
-    //}
-
-    //println!("Hello world");
-//}
 
 #[derive(Copy, Clone)]
 enum ChunkType {
@@ -65,7 +55,7 @@ impl ChunkType {
     }
 }
 
-pub fn write_payload(file: &mut File, buffer: &mut Vec<u8>, payload: &[u8]) {
+fn write_payload(file: &mut File, buffer: &mut Vec<u8>, payload: &[u8]) {
     let num_payload_bytes_per_chunk = buffer.capacity() - NUM_HEADER_BYTES;
 
     // 1. Exact

@@ -60,4 +60,10 @@ impl Topic {
 
         Ok(())
     }
+
+    pub fn close(&mut self) {
+        if let Some(segment) = self.current_segment.as_mut() {
+            segment.close();
+        }
+    }
 }

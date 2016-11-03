@@ -26,6 +26,10 @@ impl Segment {
         let file = self.file.as_mut().unwrap();
         write_payload(file, buffer, payload);
     }
+
+    pub fn close(&mut self) {
+        self.file = None;
+    }
 }
 
 const CRC_OFFSET: usize = 0;     // 0-3

@@ -33,6 +33,12 @@ impl Kafka {
         Ok(())
     }
 
+    fn close(&mut self) {
+        for topic in self.topics.values_mut() {
+            topic.close();
+        }
+    }
+
     fn produce(&mut self, topic: &str, message: &[u8]) -> Result<(), &'static str> {
         if let Some(topic) = self.topics.get_mut(topic) {
             return topic.produce(message);

@@ -4,6 +4,7 @@
 #![allow(unused_must_use)]
 
 extern crate crc;
+extern crate rand;
 
 mod segment;
 mod topic;

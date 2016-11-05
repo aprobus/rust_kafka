@@ -14,7 +14,7 @@ pub struct Topic {
 }
 
 impl Topic {
-    pub fn new(path: &Path) -> io::Result<Topic> {
+    pub fn new(path: &Path, buffer_size: usize) -> io::Result<Topic> {
         let path_buf = path.to_path_buf();
 
         println!("Creating dir: {:?}", &path_buf);
@@ -42,7 +42,7 @@ impl Topic {
             }
         }
 
-        let buffer = vec![0; 512];
+        let buffer = vec![0; buffer_size];
 
         let topic = Topic { dir: path_buf, segments: segments, buffer: buffer, current_segment: None };
         Ok(topic)

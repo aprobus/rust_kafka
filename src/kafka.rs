@@ -6,6 +6,8 @@ use std::io;
 
 use topic::Topic;
 
+const BUFFER_SIZE: usize = 512;
+
 struct Kafka {
     dir: PathBuf,
     topics: HashMap<String, Topic>
@@ -28,7 +30,7 @@ impl Kafka {
             if path.is_dir() {
                 let topic_name = path.file_name().unwrap().to_str().unwrap().to_string();
                 println!("Found topic: {:?}", topic_name);
-                let topic = Topic::new(&path).unwrap();
+                let topic = Topic::new(&path, BUFFER_SIZE).unwrap();
                 self.topics.insert(topic_name, topic);
             }
         }
@@ -48,7 +50,7 @@ impl Kafka {
             let mut path = PathBuf::from(base_dir);
             path.push(topic_name);
 
-            return Topic::new(&path).unwrap();
+            return Topic::new(&path, BUFFER_SIZE).unwrap();
         });
 
         return topic.produce(message);
@@ -69,6 +71,12 @@ mod tests {
     use super::*;
     use super::Kafka;
     use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    use std::io;
+
+    use rand::Rng;
+    use rand;
 
     #[test]
     fn test_open () {
@@ -94,5 +102,102 @@ mod tests {
 
         let second_result = kafka.produce("foo", &vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
         assert!(second_result.is_ok());
+    }
+
+    #[test]
+    #[ignore]
+    fn test_produce_throughput_perf () {
+        let path = Path::new("./test_data/test_produce_throughput_perf");
+        let mut kafka = init_kafka_for_test(&path);
+
+        let start_time = SystemTime::now();
+
+        let test_duration = Duration::from_secs(60);;
+        let mut num_messages_produced = 0;
+        let test_message_size = 256;
+        let mut message = vec![0; test_message_size];
+
+        let mut rng = rand::thread_rng();
+        loop {
+            if start_time.elapsed().unwrap() > test_duration {
+                break;
+            }
+
+            for i in 0..test_message_size {
+                message[i] = rng.gen::<u8>();
+            }
+
+            let result = kafka.produce("foo", &message);
+            assert!(result.is_ok());
+            num_messages_produced += 1;
+        }
+
+        println!("Produced produced: {}", num_messages_produced);
+
+        // Message Size: 256
+        // Duration: 60 seconds
+        //
+        // | Write Size | Min Writes | Max Writes |
+        // | ---------- | ---------- | ---------- |
+        // | 512        | 65910      | 67659      |
+        // | 516        | 56566      | 57408      |
+    }
+
+    #[test]
+    #[ignore]
+    fn test_produce_size_perf () {
+        let path = Path::new("./test_data/test_produce_size_perf");
+        let mut kafka = init_kafka_for_test(&path);
+
+        let test_num_produces = 40000;
+        let test_message_size = 256;
+        let mut message = vec![0; test_message_size];
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..test_num_produces {
+            for i in 0..test_message_size {
+                message[i] = rng.gen::<u8>();
+            }
+
+            let result = kafka.produce("foo", &message);
+            assert!(result.is_ok());
+        }
+
+        let disk_size = dir_size(&path).unwrap();
+        println!("Size: {}", disk_size);
+
+        // Message Size: 256
+        // Messages: 40,000
+        //
+        // | Write Size | Min Size | Max Size |
+        // | ---------- | -------- | -------- |
+        // | 512        | 19.5M    | 19.5M    |
+    }
+
+    fn init_kafka_for_test(path: &Path) -> Kafka {
+        fs::remove_dir_all(path);
+
+        let path = Path::new(path);
+
+        let mut kafka = Kafka::new(&path).unwrap();
+        assert!(kafka.open().is_ok());
+        kafka
+    }
+
+    fn dir_size(dir: &Path) -> io::Result<u64> {
+        let mut dir_size = 0;
+
+        if dir.is_dir() {
+            for entry in try!(fs::read_dir(dir)) {
+                let entry = try!(entry);
+                let path = entry.path();
+                if path.is_dir() {
+                    dir_size += try!(dir_size(&path));
+                } else {
+                    dir_size += path.metadata().unwrap().len();
+                }
+            }
+        }
+        Ok(dir_size)
     }
 }

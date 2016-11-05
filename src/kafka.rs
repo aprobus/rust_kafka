@@ -12,9 +12,12 @@ struct Kafka {
 }
 
 impl Kafka {
-    fn new(dir: &Path) -> Kafka {
+    fn new(dir: &Path) -> io::Result<Kafka> {
+        try!(fs::create_dir_all(&dir));
+
         let topics = HashMap::new();
-        Kafka { dir: dir.to_path_buf(), topics: topics }
+        let kafka = Kafka { dir: dir.to_path_buf(), topics: topics };
+        Ok(kafka)
     }
 
     fn open(&mut self) -> io::Result<()> {
@@ -39,12 +42,16 @@ impl Kafka {
         }
     }
 
-    fn produce(&mut self, topic: &str, message: &[u8]) -> Result<(), &'static str> {
-        if let Some(topic) = self.topics.get_mut(topic) {
-            return topic.produce(message);
-        } else {
-            return Err("Topic not found")
-        }
+    fn produce(&mut self, topic_name: &str, message: &[u8]) -> Result<(), &'static str> {
+        let base_dir = &self.dir;
+        let topic = self.topics.entry(topic_name.to_string()).or_insert_with(|| {
+            let mut path = PathBuf::from(base_dir);
+            path.push(topic_name);
+
+            return Topic::new(&path).unwrap();
+        });
+
+        return topic.produce(message);
     }
 
     fn seek(&self, topic: &str) -> Result<(), &'static str> {
@@ -61,11 +68,12 @@ mod tests {
     use std::path::Path;
     use super::*;
     use super::Kafka;
+    use std::fs;
 
     #[test]
     fn test_open () {
         let path = Path::new("./test_data/test_open");
-        let mut kafka = Kafka::new(&path);
+        let mut kafka = Kafka::new(&path).unwrap();
         assert!(kafka.open().is_ok());
 
         let topics: Vec<&String> = kafka.topics.keys().collect();
@@ -74,8 +82,11 @@ mod tests {
 
     #[test]
     fn test_produce () {
+        fs::remove_dir_all("./test_data/test_produce/foo");
+
         let path = Path::new("./test_data/test_produce");
-        let mut kafka = Kafka::new(&path);
+
+        let mut kafka = Kafka::new(&path).unwrap();
         assert!(kafka.open().is_ok());
 
         let result = kafka.produce("foo", &vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);

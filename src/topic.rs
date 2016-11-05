@@ -16,6 +16,10 @@ pub struct Topic {
 impl Topic {
     pub fn new(path: &Path) -> io::Result<Topic> {
         let path_buf = path.to_path_buf();
+
+        println!("Creating dir: {:?}", &path_buf);
+        try!(fs::create_dir_all(&path_buf));
+
         let mut segments = Vec::new();
 
         for entry in try!(fs::read_dir(&path_buf)) {
@@ -38,7 +42,7 @@ impl Topic {
             }
         }
 
-        let buffer = vec![0; 256];
+        let buffer = vec![0; 512];
 
         let topic = Topic { dir: path_buf, segments: segments, buffer: buffer, current_segment: None };
         Ok(topic)

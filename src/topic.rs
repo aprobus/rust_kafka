@@ -9,8 +9,8 @@ use segment::Segment;
 pub struct Topic {
     dir: PathBuf,
     segments: Vec<Segment>,
-    buffer: Vec<u8>,
-    current_segment: Option<Segment>
+    current_segment: Option<Segment>,
+    buffer_size: usize
 }
 
 impl Topic {
@@ -36,15 +36,13 @@ impl Topic {
 
                     println!("Found segment file: {:?}, and offset {}", file_name_str, offset);
 
-                    let segment = Segment::new(&path, offset);
+                    let segment = Segment::new(&path, offset, buffer_size);
                     segments.push(segment);
                 }
             }
         }
 
-        let buffer = vec![0; buffer_size];
-
-        let topic = Topic { dir: path_buf, segments: segments, buffer: buffer, current_segment: None };
+        let topic = Topic { dir: path_buf, segments: segments, current_segment: None, buffer_size: buffer_size };
         Ok(topic)
     }
 
@@ -55,12 +53,12 @@ impl Topic {
             let mut path = PathBuf::from(&self.dir);
             path.push(format!("segment_{:09}", next_offset));
 
-            let segment = Segment::new(&path, next_offset);
+            let segment = Segment::new(&path, next_offset, self.buffer_size);
             self.current_segment = Some(segment);
         }
 
         let mut segment = self.current_segment.as_mut().unwrap();
-        segment.append(&mut self.buffer, message);
+        segment.append(message);
 
         Ok(())
     }

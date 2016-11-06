@@ -8,27 +8,38 @@ use crc::{crc32, Hasher32};
 pub struct Segment {
     path: PathBuf,
     pub offset: usize,
-    file: Option<File>
+    buffer_size: usize,
+    file: Option<File>,
+    write_buffer: Option<Vec<u8>>
 }
 
 impl Segment {
-    pub fn new(path: &Path, offset: usize) -> Segment {
+    pub fn new(path: &Path, offset: usize, buffer_size: usize) -> Segment {
         let path_buf = path.to_path_buf();
-        Segment { path: path_buf, offset: offset, file: None }
+        Segment {
+            path: path_buf,
+            offset: offset,
+            buffer_size: buffer_size,
+            file: None,
+            write_buffer: None
+        }
     }
 
-    pub fn append(&mut self, buffer: &mut Vec<u8>, payload: &[u8]) {
+    pub fn append(&mut self, payload: &[u8]) {
         if self.file.is_none() {
             let file = File::create(&self.path).unwrap();
             self.file = Some(file);
+            self.write_buffer = Some(vec![0; self.buffer_size]);
         }
 
         let file = self.file.as_mut().unwrap();
-        write_payload(file, buffer, payload);
+        let mut buffer = self.write_buffer.as_mut().unwrap();
+        write_payload(file, &mut buffer, payload);
     }
 
     pub fn close(&mut self) {
         self.file = None;
+        self.write_buffer = None;
     }
 }
 

@@ -163,7 +163,7 @@ mod tests {
             assert!(result.is_ok());
         }
 
-        let disk_size = dir_size(&path).unwrap();
+        let disk_size = calculate_dir_size(&path).unwrap();
         println!("Size: {}", disk_size);
 
         // Message Size: 256
@@ -184,7 +184,7 @@ mod tests {
         kafka
     }
 
-    fn dir_size(dir: &Path) -> io::Result<u64> {
+    fn calculate_dir_size(dir: &Path) -> io::Result<u64> {
         let mut dir_size = 0;
 
         if dir.is_dir() {
@@ -192,7 +192,7 @@ mod tests {
                 let entry = try!(entry);
                 let path = entry.path();
                 if path.is_dir() {
-                    dir_size += try!(dir_size(&path));
+                    dir_size += try!(calculate_dir_size(&path));
                 } else {
                     dir_size += path.metadata().unwrap().len();
                 }

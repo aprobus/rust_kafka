@@ -6,6 +6,79 @@ use std::io::prelude::*;
 use std::io::SeekFrom;
 use crc::{crc32, Hasher32};
 
+pub struct SegmentIterator {
+    file: File,
+    buffer: Vec<u8>,
+    offset: usize
+}
+
+impl SegmentIterator {
+    fn new(path: &Path, buffer_size: usize) -> SegmentIterator {
+        let segment_file = File::open(path).unwrap();
+        let buffer = vec![0; buffer_size];
+
+        SegmentIterator { file: segment_file, buffer: buffer, offset: buffer_size }
+    }
+}
+
+impl Iterator for SegmentIterator {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        let mut payload = Vec::new();
+
+        loop {
+            if self.offset + NUM_HEADER_BYTES >= self.buffer.len() {
+                self.offset = 0;
+                if self.file.read_exact(&mut self.buffer).is_err() {
+                    return None;
+                }
+            }
+
+            let (chunk_type, offset) = read_message(&self.buffer, self.offset, &mut payload);
+            self.offset = offset;
+
+            match chunk_type {
+                ChunkType::Full | ChunkType::End => {
+                    break;
+                },
+                ChunkType::Null => {
+                    return None;
+                },
+                ChunkType::Middle | ChunkType::Start => {
+                    continue;
+                }
+            }
+        }
+
+        Some(payload)
+    }
+}
+
+fn read_message(buffer: &[u8], offset: usize, payload: &mut Vec<u8>) -> (ChunkType, usize) {
+    let chunk_type = ChunkType::from_byte(buffer[offset + TYPE_OFFSET]);
+    if chunk_type == ChunkType::Null {
+        return (chunk_type, offset);
+    }
+
+    let payload_size = read_u32(buffer, offset + LEN_OFFSET).unwrap() as usize;
+    let payload_start = offset + PAYLOAD_OFFSET;
+    let payload_end = offset + PAYLOAD_OFFSET + payload_size;
+
+    let expected_crc = calculate_crc(&buffer[(offset + LEN_OFFSET)..payload_end]);
+    let actual_crc = read_u32(buffer, offset + CRC_OFFSET).unwrap();
+    if expected_crc != actual_crc {
+        panic!("Invalid crc");
+    }
+
+    payload.reserve(payload_size);
+    for i in &buffer[payload_start..payload_end] {
+        payload.push(*i);
+    }
+
+    (chunk_type, payload_end)
+}
+
 pub struct Segment {
     path: PathBuf,
     pub offset: usize,
@@ -41,6 +114,10 @@ impl Segment {
         self.buffer_offset = write_payload(file, &mut buffer, self.buffer_offset, payload);
     }
 
+    pub fn iter(&self) -> SegmentIterator {
+        SegmentIterator::new(&self.path, self.buffer_size)
+    }
+
     pub fn close(&mut self) {
         self.file = None;
         self.write_buffer = None;
@@ -54,7 +131,7 @@ pub const PAYLOAD_OFFSET: usize = 9; // 9 - ??
 
 pub const NUM_HEADER_BYTES: usize = 9; // crc(4) + length(4) + type(1)
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ChunkType {
     Null = 0,
     Full = 1,
@@ -180,45 +257,6 @@ fn write_chunk(file: &mut File, buffer: &mut Vec<u8>, payload: &[u8], chunk_inde
     adjusted_offset
 }
 
-fn read_payload(file: &mut File, buffer: &mut Vec<u8>) -> Vec<u8> {
-    let mut payload = Vec::new();
-
-    loop {
-        let read_result = read_chunk(&mut payload, file, buffer).unwrap();
-
-        match read_result {
-            ChunkType::Full | ChunkType::End | ChunkType::Null => break,
-            ChunkType::Start | ChunkType::Middle => continue,
-        };
-    }
-
-    payload
-}
-
-fn read_chunk(payload: &mut Vec<u8>, file: &mut File, buffer: &mut Vec<u8>) -> Result<ChunkType, &'static str> {
-    if let Result::Err(_) = file.read_exact(buffer) {
-        return Result::Err("Unable to read from file")
-    }
-
-    let expected_crc: u32 = read_u32(&buffer, CRC_OFFSET).unwrap();
-    write_u32(buffer, 0, CRC_OFFSET);
-    let actual_crc = calculate_crc(buffer);
-
-    if expected_crc != actual_crc {
-        return Result::Err("CRC did not much expected value")
-    }
-
-    let chunk_len = read_u32(&buffer, LEN_OFFSET).unwrap() as usize;
-    let chunk_type = ChunkType::from_byte(buffer[TYPE_OFFSET]);
-
-    payload.reserve(chunk_len);
-    for i in 0..chunk_len {
-        payload.push(buffer[PAYLOAD_OFFSET + i]);
-    }
-
-    Result::Ok(chunk_type)
-}
-
 pub fn read_u32(buffer: &[u8], index: usize) -> Result<u32, &'static str> {
     let size = mem::size_of::<u32>();
 
@@ -305,7 +343,7 @@ mod tests {
         assert_eq!(result, 45);
     }
 
-    fn write_messages_to_segment(path: &Path, buffer_size: usize, messages: &[&[u8]]) -> Vec<u8> {
+    fn write_messages_to_segment(path: &Path, buffer_size: usize, messages: &[&[u8]]) -> (Vec<u8>, Segment) {
         fs::remove_file(&path);
         let mut seg = Segment::new(path, 0, buffer_size);
 
@@ -317,7 +355,7 @@ mod tests {
 
         let file = File::open(&path).unwrap();
         let segment_bytes = file.bytes().map(|b| b.unwrap()).collect();
-        segment_bytes
+        (segment_bytes, seg)
     }
 
     fn validate_full_message(segment_bytes: &[u8], message: &[u8], offset: usize) {
@@ -330,7 +368,7 @@ mod tests {
     fn test_single_append_full_initial() {
         let path = Path::new("./test_data/segments/test_single_append_full_initial");
         let message = vec![0, 1, 2, 3, 4];
-        let segment_bytes = write_messages_to_segment(&path, 16, &[&message]);
+        let (segment_bytes, _) = write_messages_to_segment(&path, 16, &[&message]);
         assert_eq!(segment_bytes.len(), 16);
 
         validate_full_message(&segment_bytes, &message, 0);
@@ -341,7 +379,7 @@ mod tests {
         let path = Path::new("./test_data/segments/test_append_split");
         let message = vec![0, 1, 2, 3, 4, 5, 6, 7];
 
-        let segment_bytes = write_messages_to_segment(&path, 16, &[&message]);
+        let (segment_bytes, _) = write_messages_to_segment(&path, 16, &[&message]);
         assert_eq!(segment_bytes.len(), 32);
 
         assert_eq!(read_u32(&segment_bytes, LEN_OFFSET).unwrap(), 7);
@@ -358,7 +396,7 @@ mod tests {
         let path = Path::new("./test_data/segments/test_multi_append_full_initial");
         let initial_message = vec![42];
         let seconday_message = vec![0, 1, 2, 3, 4];
-        let segment_bytes = write_messages_to_segment(&path, 32, &[&initial_message, &seconday_message]);
+        let (segment_bytes, _) = write_messages_to_segment(&path, 32, &[&initial_message, &seconday_message]);
         assert_eq!(segment_bytes.len(), 32);
 
         // Initial message
@@ -377,7 +415,7 @@ mod tests {
         let path = Path::new("./test_data/segments/test_multi_append_partial_initial");
         let initial_message = vec![42]; // 10 bytes
         let seconday_message = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]; // 23 bytes
-        let segment_bytes = write_messages_to_segment(&path, 32, &[&initial_message, &seconday_message]); // 10 + 23 > 32
+        let (segment_bytes, _) = write_messages_to_segment(&path, 32, &[&initial_message, &seconday_message]); // 10 + 23 > 32
         assert_eq!(segment_bytes.len(), 64);
 
         // Inital message
@@ -403,7 +441,7 @@ mod tests {
         let path = Path::new("./test_data/segments/test_multi_append_none_initial");
         let initial_message = vec![42];
         let seconday_message = vec![0, 1, 2, 3, 4];
-        let segment_bytes = write_messages_to_segment(&path, 16, &[&initial_message, &seconday_message]);
+        let (segment_bytes, _) = write_messages_to_segment(&path, 16, &[&initial_message, &seconday_message]);
         assert_eq!(segment_bytes.len(), 32);
 
         // Initial message
@@ -415,5 +453,22 @@ mod tests {
         assert_eq!(segment_bytes[secondary_message_offset + TYPE_OFFSET], ChunkType::Full as u8);
         let actual_secondary_message = &segment_bytes[secondary_message_offset + PAYLOAD_OFFSET..(secondary_message_offset + PAYLOAD_OFFSET + seconday_message.len())];
         assert_eq!(&seconday_message[0..seconday_message.len()], actual_secondary_message);
+    }
+
+    #[test]
+    fn test_iter() {
+        let path = Path::new("./test_data/segments/test_iter");
+        let initial_message = vec![42]; // 10 bytes
+        let seconday_message = vec![0, 1, 2, 3, 4]; // 14 bytes
+        let (_, segment) = write_messages_to_segment(&path, 16, &[&initial_message, &seconday_message]);
+
+        let mut iter = segment.iter();
+        let read_one = iter.next();
+        let read_two = iter.next();
+        let read_three = iter.next();
+
+        assert_eq!(read_one, Some(initial_message)); // Full message
+        assert_eq!(read_two, Some(seconday_message)); // Split message
+        assert_eq!(read_three, None);
     }
 }

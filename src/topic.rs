@@ -1,15 +1,48 @@
 use std::path::Path;
 use std::path::PathBuf;
+use std::collections::LinkedList;
+use std::rc::Rc;
 use std::fs::{self, DirEntry};
 use std::fs::File;
 use std::io;
 
 use segment::Segment;
+use segment::SegmentIterator;
+
+pub struct TopicIterator {
+    segments: LinkedList<Rc<Segment>>,
+    segment_iter: Option<SegmentIterator>
+}
+
+impl TopicIterator {
+    fn new(segments: LinkedList<Rc<Segment>>) -> TopicIterator {
+        TopicIterator { segments: segments, segment_iter: None }
+    }
+}
+
+impl Iterator for TopicIterator {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        let message = self.segment_iter.as_mut().and_then(|iter| iter.next());
+
+        if let Some(value) = message {
+            Some(value)
+        } else {
+            if let Some(segment) = self.segments.pop_front().as_ref() {
+                self.segment_iter = Some(segment.iter());
+                self.segment_iter.as_mut().and_then(|iter| iter.next())
+            } else {
+                None
+            }
+        }
+    }
+}
 
 pub struct Topic {
     dir: PathBuf,
-    segments: Vec<Segment>,
-    current_segment: Option<Segment>,
+    segments: Vec<Rc<Segment>>,
+    current_segment: Option<Box<Segment>>,
     buffer_size: usize
 }
 
@@ -36,7 +69,7 @@ impl Topic {
 
                     println!("Found segment file: {:?}, and offset {}", file_name_str, offset);
 
-                    let segment = Segment::new(&path, offset, buffer_size);
+                    let segment = Rc::new(Segment::new(&path, offset, buffer_size));
                     segments.push(segment);
                 }
             }
@@ -53,7 +86,7 @@ impl Topic {
             let mut path = PathBuf::from(&self.dir);
             path.push(format!("segment_{:09}", next_offset));
 
-            let segment = Segment::new(&path, next_offset, self.buffer_size);
+            let segment = Box::new(Segment::new(&path, next_offset, self.buffer_size));
             self.current_segment = Some(segment);
         }
 
@@ -64,8 +97,51 @@ impl Topic {
     }
 
     pub fn close(&mut self) {
-        if let Some(segment) = self.current_segment.as_mut() {
+        if let Some(mut segment) = self.current_segment.take() {
             segment.close();
+            self.segments.push(Rc::new(*segment));
         }
+    }
+
+    pub fn iter(&self) -> TopicIterator {
+        let mut segments = LinkedList::new();
+
+        for segment in &self.segments {
+            segments.push_back(segment.clone());
+        }
+
+        TopicIterator::new(segments)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::fs;
+    use std::fs::File;
+    use std::io::Read;
+
+    #[test]
+    fn test_topic_iter() {
+        let path = Path::new("./test_data/topics/test_topic_iter");
+        fs::remove_dir_all(&path);
+
+        let mut topic = Topic::new(&path, 64).unwrap();
+
+        let message_1 = vec![0, 1];
+        let message_2 = vec![1, 2];
+
+        topic.produce(&message_1);
+        topic.close();
+
+        topic.produce(&message_2);
+        topic.close();
+
+        let mut iter = topic.iter();
+        let actual_messages = vec!(iter.next(), iter.next(), iter.next());
+        assert_eq!(actual_messages[0], Some(message_1));
+        assert_eq!(actual_messages[1], Some(message_2));
+        assert_eq!(actual_messages[2], None);
     }
 }

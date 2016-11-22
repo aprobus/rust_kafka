@@ -5,6 +5,7 @@ use std::path::Path;
 use std::io::prelude::*;
 use std::io::SeekFrom;
 use crc::{crc32, Hasher32};
+use std::io;
 
 pub struct SegmentIterator {
     file: File,
@@ -19,6 +20,39 @@ impl SegmentIterator {
 
         SegmentIterator { file: segment_file, buffer: buffer, offset: buffer_size }
     }
+
+    fn is_stale(&self) -> bool {
+        ChunkType::from_byte(self.buffer[self.offset + TYPE_OFFSET]) == ChunkType::Null
+    }
+
+    fn is_buffer_exhausted(&self) -> bool {
+        self.offset + NUM_HEADER_BYTES >= self.buffer.len()
+    }
+
+    fn load_buffer(&mut self) -> io::Result<()> {
+        let load_result = self.file.read_exact(&mut self.buffer);
+
+        if load_result.is_ok() {
+            self.offset = 0;
+        }
+
+        load_result
+    }
+
+    fn reload_buffer(&mut self) {
+        let buffer_size = self.buffer.len() as i64;
+        self.file.seek(SeekFrom::Current(-buffer_size)).expect("Failed to reset read location");
+        self.file.read_exact(&mut self.buffer).expect("Failed to reread buffer");
+    }
+
+    fn ensure_buffer_loaded(&mut self) -> io::Result<()> {
+        if self.is_buffer_exhausted() {
+            self.load_buffer()
+        } else {
+            Ok(())
+        }
+    }
+
 }
 
 impl Iterator for SegmentIterator {
@@ -27,12 +61,16 @@ impl Iterator for SegmentIterator {
     fn next(&mut self) -> Option<Vec<u8>> {
         let mut payload = Vec::new();
 
+        if !self.is_buffer_exhausted() && self.is_stale() {
+            self.reload_buffer();
+            if self.is_stale() {
+                return None;
+            }
+        }
+
         loop {
-            if self.offset + NUM_HEADER_BYTES >= self.buffer.len() {
-                self.offset = 0;
-                if self.file.read_exact(&mut self.buffer).is_err() {
-                    return None;
-                }
+            if self.ensure_buffer_loaded().is_err() {
+                return None;
             }
 
             let (chunk_type, offset) = read_message(&self.buffer, self.offset, &mut payload);
@@ -456,19 +494,45 @@ mod tests {
     }
 
     #[test]
-    fn test_iter() {
-        let path = Path::new("./test_data/segments/test_iter");
+    fn test_iter_closed_segment() {
+        let path = Path::new("./test_data/segments/test_iter_closed_segment");
         let initial_message = vec![42]; // 10 bytes
         let seconday_message = vec![0, 1, 2, 3, 4]; // 14 bytes
         let (_, segment) = write_messages_to_segment(&path, 16, &[&initial_message, &seconday_message]);
 
         let mut iter = segment.iter();
-        let read_one = iter.next();
+
+        assert_eq!(iter.next(), Some(initial_message)); // Full message
+        assert_eq!(iter.next(), Some(seconday_message)); // Split message
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_iter_open_segment() {
+        let path = Path::new("./test_data/segments/test_iter_open_segment");
+        let first_message = vec![42]; // 10 bytes
+        let second_message = vec![0, 1, 2, 3, 4]; // 14 bytes
+        let third_message = vec![56]; // 10 bytes
+
+        fs::remove_file(&path);
+        let mut segment = Segment::new(path, 0, 32);
+        segment.append(&first_message);
+
+        let mut iter = segment.iter();
+        let read_one = iter.next(); // Read *before* next message is written
+
+        segment.append(&second_message); // Written *after* iter buffer has been filled
+
         let read_two = iter.next();
         let read_three = iter.next();
 
-        assert_eq!(read_one, Some(initial_message)); // Full message
-        assert_eq!(read_two, Some(seconday_message)); // Split message
+        assert_eq!(read_one, Some(first_message)); // Full message
+        assert_eq!(read_two, Some(second_message)); // Split message
         assert_eq!(read_three, None);
+
+        segment.append(&third_message);
+        let read_four = iter.next();
+        assert_eq!(read_four, Some(third_message));
     }
 }

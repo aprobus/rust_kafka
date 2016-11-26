@@ -148,7 +148,8 @@ pub struct SegmentWriter {
     segment_info: SegmentInfo,
     file: File,
     write_buffer: Vec<u8>,
-    buffer_offset: usize
+    buffer_offset: usize,
+    num_payload_bytes_per_chunk: usize
 }
 
 impl SegmentWriter {
@@ -156,18 +157,171 @@ impl SegmentWriter {
         let file = File::create(&segment_info.path).unwrap();
         let write_buffer = vec![0; segment_info.buffer_size];
 
+        let num_payload_bytes_per_chunk = segment_info.buffer_size - NUM_HEADER_BYTES;
+
         SegmentWriter {
             file: file,
             buffer_offset: 0,
             write_buffer: write_buffer,
-            segment_info: segment_info
+            segment_info: segment_info,
+            num_payload_bytes_per_chunk: num_payload_bytes_per_chunk
         }
     }
 
     pub fn append(&mut self, payload: &[u8]) {
-        self.buffer_offset = write_payload(&mut self.file, &mut self.write_buffer, self.buffer_offset, payload);
+        self.write_payload(payload);
         self.segment_info.next_offset += 1;
     }
+
+    fn buffer_payload_capacity(&self) -> usize {
+        let num_used_bytes = self.buffer_offset + NUM_HEADER_BYTES;
+
+        if num_used_bytes >= self.write_buffer.len() {
+            0
+        } else {
+            self.write_buffer.len() - num_used_bytes
+        }
+    }
+
+    fn is_buffer_full(&self) -> bool {
+        self.buffer_payload_capacity() == 0
+    }
+
+    fn is_buffer_hungry(&self) -> bool {
+        self.buffer_payload_capacity() > 0
+    }
+
+    fn is_buffer_clean(&self) -> bool {
+        self.buffer_offset == 0
+    }
+
+    fn is_buffer_dirty(&self) -> bool {
+        !self.is_buffer_clean()
+    }
+
+    fn seek_buffer_start(&mut self) -> io::Result<()> {
+        if self.is_buffer_dirty() {
+            self.file.seek(SeekFrom::Current(-(self.write_buffer.len() as i64))).and_then(|_| Result::Ok(()))
+        } else {
+            Result::Ok(())
+        }
+    }
+
+    fn num_chunks(&self, payload: &[u8]) -> usize {
+        // 1. Exact
+        // payload_size = 10
+        // chunk_size = 10
+        //
+        // (10 + 10 - 1) / 10
+        // 19 / 10
+        // 1 chunk
+        //
+        // 2. Partial
+        // payload_size = 12
+        // chunk_size = 10
+        //
+        // (12 + 10 - 1) / 10
+        // 21 / 10
+        // 2 chunks
+        (payload.len() + self.num_payload_bytes_per_chunk - 1) / self.num_payload_bytes_per_chunk
+    }
+
+    fn clear_buffer(&mut self) {
+        for i in 0..self.write_buffer.len() {
+            self.write_buffer[i] = 0;
+        }
+
+        self.buffer_offset = 0;
+    }
+
+    fn write_payload(&mut self, payload: &[u8]) {
+        if payload.len() == 0 {
+            panic!("Can't handle empty messages");
+        }
+
+        let empty_vector = vec![];
+
+        let mut remaining_payload = payload;
+        let mut num_pre_chunks = 0;
+
+        if self.is_buffer_hungry() && self.is_buffer_dirty() {
+            let open_buffer_size = self.buffer_payload_capacity();
+            // Last written chunk has room to append additional payload
+            self.seek_buffer_start();
+            num_pre_chunks = 1;
+
+            if remaining_payload.len() <= open_buffer_size {
+                // Full write
+                self.write_chunk(remaining_payload, 0, 1);
+                remaining_payload = &empty_vector;
+            } else {
+                // Partial write
+                let chunk = &remaining_payload[0..open_buffer_size];
+                self.write_chunk(chunk, 0, 2); // Num chunks >= 2
+                remaining_payload = &remaining_payload[open_buffer_size..remaining_payload.len()];
+            }
+        }
+
+        if remaining_payload.len() > 0 {
+            let num_chunks = num_pre_chunks + self.num_chunks(remaining_payload);
+
+            let mut chunks_iter = remaining_payload.chunks(self.num_payload_bytes_per_chunk).enumerate();
+            while let Some((i, next_chunk)) = chunks_iter.next() {
+                self.clear_buffer();
+
+                self.write_chunk(next_chunk, i + num_pre_chunks, num_chunks);
+            }
+        }
+
+        self.file.flush().expect("Failed to flush");
+        self.file.sync_all().expect("Failed to sync");
+    }
+
+    fn write_chunk(&mut self, payload: &[u8], chunk_index: usize, num_chunks: usize) {
+        let num_chunk_bytes: usize = payload.len() + NUM_HEADER_BYTES;
+        let chunk_end = self.buffer_offset + num_chunk_bytes;
+
+        (payload.len() as u32).write_bytes(&mut self.write_buffer, self.buffer_offset + LEN_OFFSET);
+
+        self.write_buffer[self.buffer_offset + TYPE_OFFSET] = if chunk_index == 0 && num_chunks == 1 {
+            ChunkType::Full as u8
+        } else if chunk_index == 0 {
+            ChunkType::Start as u8
+        } else if chunk_index + 1 == num_chunks {
+            ChunkType::End as u8
+        } else {
+            ChunkType::Middle as u8
+        };
+
+        let mut payload_iter = payload.iter().enumerate();
+        while let Some((i, x)) = payload_iter.next() {
+            self.write_buffer[self.buffer_offset + PAYLOAD_OFFSET + i] = *x;
+        }
+
+        let crc_start = self.buffer_offset + LEN_OFFSET; // Skip crc
+        let record_crc = calculate_crc(&self.write_buffer[crc_start..chunk_end]);
+
+        record_crc.write_bytes(&mut self.write_buffer, self.buffer_offset + CRC_OFFSET);
+
+        self.file.write_all(&self.write_buffer).expect("Failed to write");
+
+        self.buffer_offset = chunk_end
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     pub fn segment_info_snapshot(&self) -> SegmentInfo {
         self.segment_info.clone()
@@ -201,109 +355,6 @@ impl ChunkType {
             _ => panic!("Unknown chunk type"),
         }
     }
-}
-
-fn write_payload(file: &mut File, buffer: &mut Vec<u8>, initial_buffer_offset: usize, payload: &[u8]) -> usize {
-    if payload.len() == 0 {
-        panic!("Can't handle empty messages");
-    }
-
-    let empty_vector = vec![];
-
-    let mut remaining_payload = payload;
-    let mut buffer_offset = initial_buffer_offset;
-    let mut num_pre_chunks = 0;
-
-    let has_buffer_space = initial_buffer_offset + NUM_HEADER_BYTES < buffer.len();
-    let is_buffer_written = initial_buffer_offset > 0;
-    if has_buffer_space && is_buffer_written {
-        let open_buffer_size = buffer.len() - initial_buffer_offset - NUM_HEADER_BYTES;
-        // Last written chunk has room to append additional payload
-        file.seek(SeekFrom::Current(-(buffer.len() as i64))).expect("Failed to reset write location");
-        num_pre_chunks = 1;
-
-        if remaining_payload.len() <= open_buffer_size {
-            // Full write
-            buffer_offset = write_chunk(file, buffer, remaining_payload, 0, 1, buffer_offset);
-            remaining_payload = &empty_vector;
-        } else {
-            // Partial write
-            let chunk = &remaining_payload[0..open_buffer_size];
-            buffer_offset = write_chunk(file, buffer, chunk, 0, 2, buffer_offset); // Num chunks >= 2
-            remaining_payload = &remaining_payload[open_buffer_size..remaining_payload.len()];
-        }
-
-    }
-
-    if remaining_payload.len() > 0 {
-        // 1. Exact
-        // payload_size = 10
-        // chunk_size = 10
-        //
-        // (10 + 10 - 1) / 10
-        // 19 / 10
-        // 1 chunk
-        //
-        // 2. Partial
-        // payload_size = 12
-        // chunk_size = 10
-        //
-        // (12 + 10 - 1) / 10
-        // 21 / 10
-        // 2 chunks
-        let num_payload_bytes_per_chunk = buffer.capacity() - NUM_HEADER_BYTES;
-        let num_chunks = num_pre_chunks + (remaining_payload.len() + num_payload_bytes_per_chunk - 1) / num_payload_bytes_per_chunk;
-
-        let mut chunks_iter = remaining_payload.chunks(num_payload_bytes_per_chunk).enumerate();
-        while let Some((i, next_chunk)) = chunks_iter.next() {
-            buffer_offset = 0;
-            clear_buffer(buffer);
-
-            buffer_offset = write_chunk(file, buffer, next_chunk, i + num_pre_chunks, num_chunks, buffer_offset);
-        }
-    }
-
-    file.flush().expect("Failed to flush");
-    file.sync_all().expect("Failed to sync");
-
-    buffer_offset
-}
-
-fn clear_buffer(buffer: &mut Vec<u8>) {
-    for i in 0..buffer.len() {
-        buffer[i] = 0;
-    }
-}
-
-fn write_chunk(file: &mut File, buffer: &mut Vec<u8>, payload: &[u8], chunk_index: usize, num_chunks: usize, buffer_offset: usize) -> usize {
-    let num_chunk_bytes: usize = payload.len() + NUM_HEADER_BYTES;
-    let adjusted_offset = buffer_offset + num_chunk_bytes;
-
-    (payload.len() as u32).write_bytes(buffer, buffer_offset + LEN_OFFSET);
-
-    buffer[buffer_offset + TYPE_OFFSET] = if chunk_index == 0 && num_chunks == 1 {
-        ChunkType::Full as u8
-    } else if chunk_index == 0 {
-        ChunkType::Start as u8
-    } else if chunk_index + 1 == num_chunks {
-        ChunkType::End as u8
-    } else {
-        ChunkType::Middle as u8
-    };
-
-    let mut payload_iter = payload.iter().enumerate();
-    while let Some((i, x)) = payload_iter.next() {
-        buffer[buffer_offset + PAYLOAD_OFFSET + i] = *x;
-    }
-
-    let crc_start = buffer_offset + LEN_OFFSET; // Skip crc
-    let record_crc = calculate_crc(&buffer[crc_start..adjusted_offset]);
-
-    record_crc.write_bytes(buffer, buffer_offset + CRC_OFFSET);
-
-    file.write_all(&buffer).expect("Failed to write");
-
-    adjusted_offset
 }
 
 pub trait Persistable<T> {

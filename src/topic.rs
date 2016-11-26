@@ -82,13 +82,13 @@ impl Topic {
 
     pub fn produce(&mut self, message: &[u8]) -> Result<(), &'static str> {
         if self.open_segment.is_none() {
-            let next_offset = self.segments.last().map(|segment| segment.offset + 1).unwrap_or(0);
+            let next_offset = self.segments.last().map(|segment| segment.index + 1).unwrap_or(0);
 
             let mut path = PathBuf::from(&self.dir);
             path.push(format!("segment_{:09}", next_offset));
 
-            let segment = Box::new(SegmentInfo::new(&path, next_offset, self.buffer_size));
-            self.open_segment = Some(SegmentWriter::new(segment));
+            let segment_info = SegmentInfo::new(&path, next_offset, self.buffer_size);
+            self.open_segment = Some(SegmentWriter::new(segment_info));
         }
 
         let mut segment = self.open_segment.as_mut().unwrap();
@@ -98,8 +98,7 @@ impl Topic {
     }
 
     pub fn close(&mut self) {
-        if let Some(segment) = self.open_segment.take().and_then(|ref mut segment_writer| segment_writer.take()) {
-            let segment_info = Rc::new(*segment);
+        if let Some(segment_info) = self.open_segment.take().map(|segment| Rc::new(segment.segment_info_snapshot())) {
             self.segments.push(segment_info);
         }
     }

@@ -117,20 +117,25 @@ fn read_message(buffer: &[u8], offset: usize, payload: &mut Vec<u8>) -> (ChunkTy
     (chunk_type, payload_end)
 }
 
+#[derive(Clone)]
 pub struct SegmentInfo {
     path: PathBuf,
-    pub offset: usize,
-    buffer_size: usize
+    pub index: usize,
+    buffer_size: usize,
+    start_offset: usize,
+    next_offset: usize
 }
 
 impl SegmentInfo {
-    pub fn new(path: &Path, offset: usize, buffer_size: usize) -> SegmentInfo {
+    pub fn new(path: &Path, index: usize, buffer_size: usize) -> SegmentInfo {
         let path_buf = path.to_path_buf();
 
         SegmentInfo {
             path: path_buf,
-            offset: offset,
-            buffer_size: buffer_size
+            index: index,
+            buffer_size: buffer_size,
+            start_offset: 0,
+            next_offset: 0
         }
     }
 
@@ -140,14 +145,14 @@ impl SegmentInfo {
 }
 
 pub struct SegmentWriter {
-    segment_info: Option<Box<SegmentInfo>>,
+    segment_info: SegmentInfo,
     file: File,
     write_buffer: Vec<u8>,
     buffer_offset: usize
 }
 
 impl SegmentWriter {
-    pub fn new(segment_info: Box<SegmentInfo>) -> SegmentWriter {
+    pub fn new(segment_info: SegmentInfo) -> SegmentWriter {
         let file = File::create(&segment_info.path).unwrap();
         let write_buffer = vec![0; segment_info.buffer_size];
 
@@ -155,21 +160,17 @@ impl SegmentWriter {
             file: file,
             buffer_offset: 0,
             write_buffer: write_buffer,
-            segment_info: Some(segment_info)
+            segment_info: segment_info
         }
     }
 
     pub fn append(&mut self, payload: &[u8]) {
-        match self.segment_info {
-            Some(_) => {
-                self.buffer_offset = write_payload(&mut self.file, &mut self.write_buffer, self.buffer_offset, payload);
-            },
-            None => panic!("Segment has been closed")
-        }
+        self.buffer_offset = write_payload(&mut self.file, &mut self.write_buffer, self.buffer_offset, payload);
+        self.segment_info.next_offset += 1;
     }
 
-    pub fn take(&mut self) -> Option<Box<SegmentInfo>> {
-        self.segment_info.take()
+    pub fn segment_info_snapshot(&self) -> SegmentInfo {
+        self.segment_info.clone()
     }
 }
 
@@ -392,23 +393,23 @@ mod tests {
         assert_eq!(result, 45);
     }
 
-    fn write_messages_to_segment(path: &Path, buffer_size: usize, messages: &[&[u8]]) -> (Vec<u8>, Box<SegmentInfo>) {
+    fn write_messages_to_segment(path: &Path, buffer_size: usize, messages: &[&[u8]]) -> (Vec<u8>, SegmentInfo) {
         fs::remove_file(&path);
-        let seg = Box::new(SegmentInfo::new(path, 0, buffer_size));
 
-        let seg = {
-            let mut seg_writer = SegmentWriter::new(seg);
+        let segment_info = {
+            let segment_info = SegmentInfo::new(path, 0, buffer_size);
+            let mut seg_writer = SegmentWriter::new(segment_info);
 
             for message in messages {
                 seg_writer.append(&message);
             }
 
-            seg_writer.take()
-        }.unwrap();
+            seg_writer.segment_info_snapshot()
+        };
 
         let file = File::open(&path).unwrap();
         let segment_bytes = file.bytes().map(|b| b.unwrap()).collect();
-        (segment_bytes, seg)
+        (segment_bytes, segment_info)
     }
 
     fn validate_full_message(segment_bytes: &[u8], message: &[u8], offset: usize) {
@@ -532,11 +533,11 @@ mod tests {
 
         fs::remove_file(&path);
 
-        let segment_info = Box::new(SegmentInfo::new(path, 0, 32));
+        let segment_info = SegmentInfo::new(path, 0, 32);
         let mut segment = SegmentWriter::new(segment_info);
         segment.append(&first_message);
 
-        let mut iter = segment.segment_info.as_ref().unwrap().iter();
+        let mut iter = segment.segment_info.iter();
         let read_one = iter.next(); // Read *before* next message is written
 
         segment.append(&second_message); // Written *after* iter buffer has been filled

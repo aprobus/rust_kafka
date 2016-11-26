@@ -117,48 +117,59 @@ fn read_message(buffer: &[u8], offset: usize, payload: &mut Vec<u8>) -> (ChunkTy
     (chunk_type, payload_end)
 }
 
-pub struct Segment {
+pub struct SegmentInfo {
     path: PathBuf,
     pub offset: usize,
-    buffer_size: usize,
-    file: Option<File>,
-    write_buffer: Option<Vec<u8>>,
-    buffer_offset: usize
+    buffer_size: usize
 }
 
-impl Segment {
-    pub fn new(path: &Path, offset: usize, buffer_size: usize) -> Segment {
+impl SegmentInfo {
+    pub fn new(path: &Path, offset: usize, buffer_size: usize) -> SegmentInfo {
         let path_buf = path.to_path_buf();
-        Segment {
+
+        SegmentInfo {
             path: path_buf,
             offset: offset,
-            buffer_size: buffer_size,
-            file: None,
-            write_buffer: None,
-            buffer_offset: 0
+            buffer_size: buffer_size
         }
-    }
-
-    pub fn append(&mut self, payload: &[u8]) {
-        if self.file.is_none() {
-            let file = File::create(&self.path).unwrap();
-            self.file = Some(file);
-            self.write_buffer = Some(vec![0; self.buffer_size]);
-            self.buffer_offset = 0;
-        }
-
-        let file = self.file.as_mut().unwrap();
-        let mut buffer = self.write_buffer.as_mut().unwrap();
-        self.buffer_offset = write_payload(file, &mut buffer, self.buffer_offset, payload);
     }
 
     pub fn iter(&self) -> SegmentIterator {
         SegmentIterator::new(&self.path, self.buffer_size)
     }
+}
 
-    pub fn close(&mut self) {
-        self.file = None;
-        self.write_buffer = None;
+pub struct SegmentWriter {
+    segment_info: Option<Box<SegmentInfo>>,
+    file: File,
+    write_buffer: Vec<u8>,
+    buffer_offset: usize
+}
+
+impl SegmentWriter {
+    pub fn new(segment_info: Box<SegmentInfo>) -> SegmentWriter {
+        let file = File::create(&segment_info.path).unwrap();
+        let write_buffer = vec![0; segment_info.buffer_size];
+
+        SegmentWriter {
+            file: file,
+            buffer_offset: 0,
+            write_buffer: write_buffer,
+            segment_info: Some(segment_info)
+        }
+    }
+
+    pub fn append(&mut self, payload: &[u8]) {
+        match self.segment_info {
+            Some(_) => {
+                self.buffer_offset = write_payload(&mut self.file, &mut self.write_buffer, self.buffer_offset, payload);
+            },
+            None => panic!("Segment has been closed")
+        }
+    }
+
+    pub fn take(&mut self) -> Option<Box<SegmentInfo>> {
+        self.segment_info.take()
     }
 }
 
@@ -381,15 +392,19 @@ mod tests {
         assert_eq!(result, 45);
     }
 
-    fn write_messages_to_segment(path: &Path, buffer_size: usize, messages: &[&[u8]]) -> (Vec<u8>, Segment) {
+    fn write_messages_to_segment(path: &Path, buffer_size: usize, messages: &[&[u8]]) -> (Vec<u8>, Box<SegmentInfo>) {
         fs::remove_file(&path);
-        let mut seg = Segment::new(path, 0, buffer_size);
+        let seg = Box::new(SegmentInfo::new(path, 0, buffer_size));
 
-        for message in messages {
-            seg.append(&message);
-        }
+        let seg = {
+            let mut seg_writer = SegmentWriter::new(seg);
 
-        seg.close();
+            for message in messages {
+                seg_writer.append(&message);
+            }
+
+            seg_writer.take()
+        }.unwrap();
 
         let file = File::open(&path).unwrap();
         let segment_bytes = file.bytes().map(|b| b.unwrap()).collect();
@@ -516,10 +531,12 @@ mod tests {
         let third_message = vec![56]; // 10 bytes
 
         fs::remove_file(&path);
-        let mut segment = Segment::new(path, 0, 32);
+
+        let segment_info = Box::new(SegmentInfo::new(path, 0, 32));
+        let mut segment = SegmentWriter::new(segment_info);
         segment.append(&first_message);
 
-        let mut iter = segment.iter();
+        let mut iter = segment.segment_info.as_ref().unwrap().iter();
         let read_one = iter.next(); // Read *before* next message is written
 
         segment.append(&second_message); // Written *after* iter buffer has been filled

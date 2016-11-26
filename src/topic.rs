@@ -6,16 +6,17 @@ use std::fs::{self, DirEntry};
 use std::fs::File;
 use std::io;
 
-use segment::Segment;
+use segment::SegmentInfo;
+use segment::SegmentWriter;
 use segment::SegmentIterator;
 
 pub struct TopicIterator {
-    segments: LinkedList<Rc<Segment>>,
+    segments: LinkedList<Rc<SegmentInfo>>,
     segment_iter: Option<SegmentIterator>
 }
 
 impl TopicIterator {
-    fn new(segments: LinkedList<Rc<Segment>>) -> TopicIterator {
+    fn new(segments: LinkedList<Rc<SegmentInfo>>) -> TopicIterator {
         TopicIterator { segments: segments, segment_iter: None }
     }
 }
@@ -41,8 +42,8 @@ impl Iterator for TopicIterator {
 
 pub struct Topic {
     dir: PathBuf,
-    segments: Vec<Rc<Segment>>,
-    current_segment: Option<Box<Segment>>,
+    segments: Vec<Rc<SegmentInfo>>,
+    open_segment: Option<SegmentWriter>,
     buffer_size: usize
 }
 
@@ -69,37 +70,37 @@ impl Topic {
 
                     println!("Found segment file: {:?}, and offset {}", file_name_str, offset);
 
-                    let segment = Rc::new(Segment::new(&path, offset, buffer_size));
+                    let segment = Rc::new(SegmentInfo::new(&path, offset, buffer_size));
                     segments.push(segment);
                 }
             }
         }
 
-        let topic = Topic { dir: path_buf, segments: segments, current_segment: None, buffer_size: buffer_size };
+        let topic = Topic { dir: path_buf, segments: segments, open_segment: None, buffer_size: buffer_size };
         Ok(topic)
     }
 
     pub fn produce(&mut self, message: &[u8]) -> Result<(), &'static str> {
-        if self.current_segment.is_none() {
+        if self.open_segment.is_none() {
             let next_offset = self.segments.last().map(|segment| segment.offset + 1).unwrap_or(0);
 
             let mut path = PathBuf::from(&self.dir);
             path.push(format!("segment_{:09}", next_offset));
 
-            let segment = Box::new(Segment::new(&path, next_offset, self.buffer_size));
-            self.current_segment = Some(segment);
+            let segment = Box::new(SegmentInfo::new(&path, next_offset, self.buffer_size));
+            self.open_segment = Some(SegmentWriter::new(segment));
         }
 
-        let mut segment = self.current_segment.as_mut().unwrap();
+        let mut segment = self.open_segment.as_mut().unwrap();
         segment.append(message);
 
         Ok(())
     }
 
     pub fn close(&mut self) {
-        if let Some(mut segment) = self.current_segment.take() {
-            segment.close();
-            self.segments.push(Rc::new(*segment));
+        if let Some(segment) = self.open_segment.take().and_then(|ref mut segment_writer| segment_writer.take()) {
+            let segment_info = Rc::new(*segment);
+            self.segments.push(segment_info);
         }
     }
 

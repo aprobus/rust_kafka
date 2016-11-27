@@ -66,11 +66,12 @@ impl Topic {
 
             if let Some(file_name_str) = path.file_name().and_then(|n| n.to_str()) {
                 if file_name_str.starts_with("segment_") {
-                    let offset = file_name_str.replace("segment_", "").parse::<usize>().unwrap();
+                    let index = file_name_str.replace("segment_", "").parse::<usize>().unwrap();
+                    println!("Found segment file: {:?}, and index {}", file_name_str, index);
 
-                    println!("Found segment file: {:?}, and offset {}", file_name_str, offset);
+                    let segment = Rc::new(SegmentInfo::from_file(&path));
+                    assert_eq!(index, segment.index);
 
-                    let segment = Rc::new(SegmentInfo::new(&path, offset, buffer_size));
                     segments.push(segment);
                 }
             }

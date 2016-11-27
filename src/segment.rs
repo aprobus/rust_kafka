@@ -117,7 +117,16 @@ fn read_message(buffer: &[u8], offset: usize, payload: &mut Vec<u8>) -> (ChunkTy
     (chunk_type, payload_end)
 }
 
-#[derive(Clone)]
+pub const FOOTER_MAGIC_OFFSET: usize = 0;        // 0
+pub const FOOTER_INDEX_OFFSET: usize = 1;        // 1-8
+pub const FOOTER_BUFFER_SIZE_OFFSET: usize = 9;  // 9-16
+pub const FOOTER_START_INDEX_OFFSET: usize = 17; // 17-24
+pub const FOOTER_NEXT_INDEX_OFFSET: usize = 25;  // 25-32
+
+pub const FOOTER_MAGIC_BYTE: u8 = 42;
+pub const FOOTER_BYTE_COUNT: usize = 33;
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SegmentInfo {
     path: PathBuf,
     pub index: usize,
@@ -136,6 +145,27 @@ impl SegmentInfo {
             buffer_size: buffer_size,
             start_offset: 0,
             next_offset: 0
+        }
+    }
+
+    pub fn from_file(path: &Path) -> SegmentInfo {
+        let mut file = File::open(path).unwrap();
+        file.seek(SeekFrom::End(-(FOOTER_BYTE_COUNT as i64))).expect("Failed to seek to footer");
+
+        let mut footer_bytes = vec![0; FOOTER_BYTE_COUNT];
+        file.read_exact(&mut footer_bytes).expect("Failed to read footer");
+
+        if u8::read_bytes(&footer_bytes, FOOTER_MAGIC_OFFSET).unwrap() != FOOTER_MAGIC_BYTE {
+            panic!("Magic byte is missing!");
+        }
+
+        let path_buf = path.to_path_buf();
+        SegmentInfo {
+            path: path.to_path_buf(),
+            index: u64::read_bytes(&footer_bytes, FOOTER_INDEX_OFFSET).unwrap() as usize,
+            buffer_size: u64::read_bytes(&footer_bytes, FOOTER_BUFFER_SIZE_OFFSET).unwrap() as usize,
+            start_offset: u64::read_bytes(&footer_bytes, FOOTER_START_INDEX_OFFSET).unwrap() as usize,
+            next_offset: u64::read_bytes(&footer_bytes, FOOTER_NEXT_INDEX_OFFSET).unwrap() as usize
         }
     }
 
@@ -234,6 +264,15 @@ impl SegmentWriter {
         self.buffer_offset = 0;
     }
 
+    fn flush(&mut self) {
+        self.file.flush().expect("Failed to flush");
+        self.file.sync_all().expect("Failed to sync");
+    }
+
+    fn write(&mut self) {
+        self.file.write_all(&self.write_buffer).expect("Failed to write");
+    }
+
     fn write_payload(&mut self, payload: &[u8]) {
         if payload.len() == 0 {
             panic!("Can't handle empty messages");
@@ -273,8 +312,7 @@ impl SegmentWriter {
             }
         }
 
-        self.file.flush().expect("Failed to flush");
-        self.file.sync_all().expect("Failed to sync");
+        self.flush();
     }
 
     fn write_chunk(&mut self, payload: &[u8], chunk_index: usize, num_chunks: usize) {
@@ -303,28 +341,36 @@ impl SegmentWriter {
 
         record_crc.write_bytes(&mut self.write_buffer, self.buffer_offset + CRC_OFFSET);
 
-        self.file.write_all(&self.write_buffer).expect("Failed to write");
+        self.write();
 
         self.buffer_offset = chunk_end
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     pub fn segment_info_snapshot(&self) -> SegmentInfo {
         self.segment_info.clone()
+    }
+
+    fn write_footer(&mut self) {
+        let mut footer = vec![0; FOOTER_BYTE_COUNT];
+        self.append_footer(&mut footer);
+        self.file.write_all(&footer).expect("Failed to write");
+
+        self.flush();
+    }
+
+    fn append_footer(&self, buffer: &mut Vec<u8>) {
+        let info = &self.segment_info;
+        (FOOTER_MAGIC_BYTE as u8).write_bytes(buffer, FOOTER_MAGIC_OFFSET);
+        (info.index as u64).write_bytes(buffer, FOOTER_INDEX_OFFSET);
+        (info.buffer_size as u64).write_bytes(buffer, FOOTER_BUFFER_SIZE_OFFSET);
+        (info.start_offset as u64).write_bytes(buffer, FOOTER_START_INDEX_OFFSET);
+        (info.next_offset as u64).write_bytes(buffer, FOOTER_NEXT_INDEX_OFFSET);
+    }
+}
+
+impl Drop for SegmentWriter {
+    fn drop(&mut self) {
+        self.write_footer();
     }
 }
 
@@ -368,11 +414,9 @@ impl Persistable<u32> for u32 {
             return Result::Err("Not enough space to write");
         }
 
-        let mut rest = self;
-
         for i in 0..4 {
-            buffer[index + i] = rest as u8;
-            rest >>= 8;
+            let next_byte = (self >> (i << 3)) as u8;
+            buffer[index + i] = next_byte;
         }
 
         Result::Ok(())
@@ -384,10 +428,71 @@ impl Persistable<u32> for u32 {
         }
 
         let mut result = 0u32;
-        for i in index..(index + 4) {
-            let next_byte = buffer[i] as u32;
+        for i in 0..4 {
+            let next_byte = buffer[index + i] as u32;
 
-            result = (result >> 8) | (next_byte << 24);
+            result |= next_byte << (i << 3);
+        }
+
+        Result::Ok(result)
+    }
+}
+
+impl Persistable<u64> for u64 {
+    fn write_bytes(self, buffer: &mut Vec<u8>, index: usize) -> Result<(), &'static str> {
+        if index + 8 > buffer.len() {
+            return Result::Err("Not enough space to write");
+        }
+
+        for i in 0..8 {
+            let next_byte = (self >> (i << 3)) as u8;
+            buffer[index + i] = next_byte;
+        }
+
+
+        Result::Ok(())
+    }
+
+    fn read_bytes(buffer: &[u8], index: usize) -> Result<u64, &'static str> {
+        if index + 8 > buffer.len() {
+            return Result::Err("Not enough readable bytes")
+        }
+
+        let mut result = 0u64;
+        for i in 0..8 {
+            let next_byte = buffer[index + i] as u64;
+
+            result |= next_byte << (i << 3);
+        }
+
+        Result::Ok(result)
+    }
+}
+
+impl Persistable<u8> for u8 {
+    fn write_bytes(self, buffer: &mut Vec<u8>, index: usize) -> Result<(), &'static str> {
+        if index + 1 > buffer.len() {
+            return Result::Err("Not enough space to write");
+        }
+
+        for i in 0..1 {
+            let next_byte = (self >> (i << 3)) as u8;
+            buffer[index + i] = next_byte;
+        }
+
+        Result::Ok(())
+    }
+
+    fn read_bytes(buffer: &[u8], index: usize) -> Result<u8, &'static str> {
+        if index + 1 > buffer.len() {
+            return Result::Err("Not enough readable bytes")
+        }
+
+        let mut result = 0u8;
+        for i in 0..1 {
+            let next_byte = buffer[index + i] as u8;
+
+            result |= next_byte << (i << 3);
         }
 
         Result::Ok(result)
@@ -423,7 +528,10 @@ mod tests {
         };
 
         let file = File::open(&path).unwrap();
-        let segment_bytes = file.bytes().map(|b| b.unwrap()).collect();
+        let mut segment_bytes: Vec<u8> = file.bytes().map(|b| b.unwrap()).collect();
+        let num_payload_bytes = segment_bytes.len() - FOOTER_BYTE_COUNT;
+        segment_bytes.truncate(num_payload_bytes);
+
         (segment_bytes, segment_info)
     }
 
@@ -437,10 +545,14 @@ mod tests {
     fn test_single_append_full_initial() {
         let path = Path::new("./test_data/segments/test_single_append_full_initial");
         let message = vec![0, 1, 2, 3, 4];
-        let (segment_bytes, _) = write_messages_to_segment(&path, 16, &[&message]);
+        let (segment_bytes, segment_info) = write_messages_to_segment(&path, 16, &[&message]);
         assert_eq!(segment_bytes.len(), 16);
 
         validate_full_message(&segment_bytes, &message, 0);
+        assert_eq!(segment_info, SegmentInfo::from_file(&path));
+        assert_eq!(segment_info.index, 0);
+        assert_eq!(segment_info.start_offset, 0);
+        assert_eq!(segment_info.next_offset, 1);
     }
 
     #[test]

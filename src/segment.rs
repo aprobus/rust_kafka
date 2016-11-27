@@ -132,19 +132,19 @@ pub struct SegmentInfo {
     pub index: usize,
     buffer_size: usize,
     start_offset: usize,
-    next_offset: usize
+    pub next_offset: usize
 }
 
 impl SegmentInfo {
-    pub fn new(path: &Path, index: usize, buffer_size: usize) -> SegmentInfo {
+    pub fn new(path: &Path, index: usize, start_offset: usize, buffer_size: usize) -> SegmentInfo {
         let path_buf = path.to_path_buf();
 
         SegmentInfo {
             path: path_buf,
             index: index,
             buffer_size: buffer_size,
-            start_offset: 0,
-            next_offset: 0
+            start_offset: start_offset,
+            next_offset: start_offset
         }
     }
 
@@ -517,7 +517,7 @@ mod tests {
         fs::remove_file(&path);
 
         let segment_info = {
-            let segment_info = SegmentInfo::new(path, 0, buffer_size);
+            let segment_info = SegmentInfo::new(path, 0, 0, buffer_size);
             let mut seg_writer = SegmentWriter::new(segment_info);
 
             for message in messages {
@@ -660,7 +660,7 @@ mod tests {
 
         fs::remove_file(&path);
 
-        let segment_info = SegmentInfo::new(path, 0, 32);
+        let segment_info = SegmentInfo::new(path, 0, 0, 32);
         let mut segment = SegmentWriter::new(segment_info);
         segment.append(&first_message);
 

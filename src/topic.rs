@@ -83,12 +83,12 @@ impl Topic {
 
     pub fn produce(&mut self, message: &[u8]) -> Result<(), &'static str> {
         if self.open_segment.is_none() {
-            let next_offset = self.segments.last().map(|segment| segment.index + 1).unwrap_or(0);
+            let (segment_index, start_offset) = self.segments.last().map(|segment| (segment.index + 1, segment.next_offset)).unwrap_or((0, 0));
 
             let mut path = PathBuf::from(&self.dir);
-            path.push(format!("segment_{:09}", next_offset));
+            path.push(format!("segment_{:09}", segment_index));
 
-            let segment_info = SegmentInfo::new(&path, next_offset, self.buffer_size);
+            let segment_info = SegmentInfo::new(&path, segment_index, start_offset, self.buffer_size);
             self.open_segment = Some(SegmentWriter::new(segment_info));
         }
 

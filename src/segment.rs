@@ -6,6 +6,7 @@ use std::io::prelude::*;
 use std::io::SeekFrom;
 use crc::{crc32, Hasher32};
 use std::io;
+use std::ops;
 
 pub struct SegmentIterator {
     file: File,
@@ -99,12 +100,12 @@ fn read_message(buffer: &[u8], offset: usize, payload: &mut Vec<u8>) -> (ChunkTy
         return (chunk_type, offset);
     }
 
-    let payload_size = u32::read_bytes(buffer, offset + LEN_OFFSET).unwrap() as usize;
+    let payload_size = read_number::<u32>(buffer, offset + LEN_OFFSET).unwrap() as usize;
     let payload_start = offset + PAYLOAD_OFFSET;
     let payload_end = offset + PAYLOAD_OFFSET + payload_size;
 
     let expected_crc = calculate_crc(&buffer[(offset + LEN_OFFSET)..payload_end]);
-    let actual_crc = u32::read_bytes(buffer, offset + CRC_OFFSET).unwrap();
+    let actual_crc = read_number::<u32>(buffer, offset + CRC_OFFSET).unwrap();
     if expected_crc != actual_crc {
         panic!("Invalid crc");
     }
@@ -155,17 +156,17 @@ impl SegmentInfo {
         let mut footer_bytes = vec![0; FOOTER_BYTE_COUNT];
         file.read_exact(&mut footer_bytes).expect("Failed to read footer");
 
-        if u8::read_bytes(&footer_bytes, FOOTER_MAGIC_OFFSET).unwrap() != FOOTER_MAGIC_BYTE {
+        if read_number::<u8>(&footer_bytes, FOOTER_MAGIC_OFFSET).unwrap() != FOOTER_MAGIC_BYTE {
             panic!("Magic byte is missing!");
         }
 
         let path_buf = path.to_path_buf();
         SegmentInfo {
             path: path.to_path_buf(),
-            index: u64::read_bytes(&footer_bytes, FOOTER_INDEX_OFFSET).unwrap() as usize,
-            buffer_size: u64::read_bytes(&footer_bytes, FOOTER_BUFFER_SIZE_OFFSET).unwrap() as usize,
-            start_offset: u64::read_bytes(&footer_bytes, FOOTER_START_INDEX_OFFSET).unwrap() as usize,
-            next_offset: u64::read_bytes(&footer_bytes, FOOTER_NEXT_INDEX_OFFSET).unwrap() as usize
+            index: read_number::<u64>(&footer_bytes, FOOTER_INDEX_OFFSET).unwrap() as usize,
+            buffer_size: read_number::<u64>(&footer_bytes, FOOTER_BUFFER_SIZE_OFFSET).unwrap() as usize,
+            start_offset: read_number::<u64>(&footer_bytes, FOOTER_START_INDEX_OFFSET).unwrap() as usize,
+            next_offset: read_number::<u64>(&footer_bytes, FOOTER_NEXT_INDEX_OFFSET).unwrap() as usize
         }
     }
 
@@ -319,7 +320,7 @@ impl SegmentWriter {
         let num_chunk_bytes: usize = payload.len() + NUM_HEADER_BYTES;
         let chunk_end = self.buffer_offset + num_chunk_bytes;
 
-        (payload.len() as u32).write_bytes(&mut self.write_buffer, self.buffer_offset + LEN_OFFSET);
+        write_number((payload.len() as u32), &mut self.write_buffer, self.buffer_offset + LEN_OFFSET);
 
         self.write_buffer[self.buffer_offset + TYPE_OFFSET] = if chunk_index == 0 && num_chunks == 1 {
             ChunkType::Full as u8
@@ -339,7 +340,7 @@ impl SegmentWriter {
         let crc_start = self.buffer_offset + LEN_OFFSET; // Skip crc
         let record_crc = calculate_crc(&self.write_buffer[crc_start..chunk_end]);
 
-        record_crc.write_bytes(&mut self.write_buffer, self.buffer_offset + CRC_OFFSET);
+        write_number(record_crc, &mut self.write_buffer, self.buffer_offset + CRC_OFFSET);
 
         self.write();
 
@@ -360,11 +361,11 @@ impl SegmentWriter {
 
     fn append_footer(&self, buffer: &mut Vec<u8>) {
         let info = &self.segment_info;
-        (FOOTER_MAGIC_BYTE as u8).write_bytes(buffer, FOOTER_MAGIC_OFFSET);
-        (info.index as u64).write_bytes(buffer, FOOTER_INDEX_OFFSET);
-        (info.buffer_size as u64).write_bytes(buffer, FOOTER_BUFFER_SIZE_OFFSET);
-        (info.start_offset as u64).write_bytes(buffer, FOOTER_START_INDEX_OFFSET);
-        (info.next_offset as u64).write_bytes(buffer, FOOTER_NEXT_INDEX_OFFSET);
+        write_number(FOOTER_MAGIC_BYTE, buffer, FOOTER_MAGIC_OFFSET);
+        write_number(info.index as u64, buffer, FOOTER_INDEX_OFFSET);
+        write_number(info.buffer_size as u64, buffer, FOOTER_BUFFER_SIZE_OFFSET);
+        write_number(info.start_offset as u64, buffer, FOOTER_START_INDEX_OFFSET);
+        write_number(info.next_offset as u64, buffer, FOOTER_NEXT_INDEX_OFFSET);
     }
 }
 
@@ -403,99 +404,80 @@ impl ChunkType {
     }
 }
 
-pub trait Persistable<T> {
-    fn write_bytes(self, buffer: &mut Vec<u8>, index: usize) -> Result<(), &'static str>;
-    fn read_bytes(buffer: &[u8], index: usize) -> Result<T, &'static str>;
+pub trait Number<T> : Copy {
+    fn set_byte(x: T, byte: u8, index: usize) -> T;
+    fn read_byte(x: T, index: usize) -> u8;
+    fn zero() -> T;
 }
 
-impl Persistable<u32> for u32 {
-    fn write_bytes(self, buffer: &mut Vec<u8>, index: usize) -> Result<(), &'static str> {
-        if index + 4 > buffer.len() {
-            return Result::Err("Not enough space to write");
-        }
-
-        for i in 0..4 {
-            let next_byte = (self >> (i << 3)) as u8;
-            buffer[index + i] = next_byte;
-        }
-
-        Result::Ok(())
+pub fn write_number<T: Number<T>>(x: T, buffer: &mut Vec<u8>, index: usize) -> Result<(), &'static str> {
+    let byte_count = mem::size_of::<T>();
+    if index + byte_count > buffer.len() {
+        return Result::Err("Not enough space to write");
     }
 
-    fn read_bytes(buffer: &[u8], index: usize) -> Result<u32, &'static str> {
-        if index + 4 > buffer.len() {
-            return Result::Err("Not enough readable bytes")
-        }
-
-        let mut result = 0u32;
-        for i in 0..4 {
-            let next_byte = buffer[index + i] as u32;
-
-            result |= next_byte << (i << 3);
-        }
-
-        Result::Ok(result)
+    for i in 0..byte_count {
+        buffer[index + i] = T::read_byte(x, i);
     }
+
+    Result::Ok(())
 }
 
-impl Persistable<u64> for u64 {
-    fn write_bytes(self, buffer: &mut Vec<u8>, index: usize) -> Result<(), &'static str> {
-        if index + 8 > buffer.len() {
-            return Result::Err("Not enough space to write");
-        }
-
-        for i in 0..8 {
-            let next_byte = (self >> (i << 3)) as u8;
-            buffer[index + i] = next_byte;
-        }
-
-
-        Result::Ok(())
+pub fn read_number<T: Number<T>>(buffer: &[u8], index: usize) -> Result<T, &'static str> {
+    let byte_count = mem::size_of::<T>();
+    if index + byte_count > buffer.len() {
+        return Result::Err("Not enough readable bytes")
     }
 
-    fn read_bytes(buffer: &[u8], index: usize) -> Result<u64, &'static str> {
-        if index + 8 > buffer.len() {
-            return Result::Err("Not enough readable bytes")
-        }
+    let mut result = T::zero();
+    for i in 0..byte_count {
+        let next_byte = buffer[index + i] as u8;
 
-        let mut result = 0u64;
-        for i in 0..8 {
-            let next_byte = buffer[index + i] as u64;
+        result = T::set_byte(result, next_byte, i);
+    }
 
-            result |= next_byte << (i << 3);
-        }
+    Result::Ok(result)
+}
 
-        Result::Ok(result)
+impl Number<u32> for u32 {
+    fn set_byte(x: u32, byte: u8, index: usize) -> u32 {
+        x | ((byte as u32) << (index << 3))
+    }
+
+    fn read_byte(x: u32, index: usize) -> u8 {
+        (x >> (index << 3)) as u8
+    }
+
+    fn zero() -> u32 {
+        0
     }
 }
 
-impl Persistable<u8> for u8 {
-    fn write_bytes(self, buffer: &mut Vec<u8>, index: usize) -> Result<(), &'static str> {
-        if index + 1 > buffer.len() {
-            return Result::Err("Not enough space to write");
-        }
-
-        for i in 0..1 {
-            let next_byte = (self >> (i << 3)) as u8;
-            buffer[index + i] = next_byte;
-        }
-
-        Result::Ok(())
+impl Number<u64> for u64 {
+    fn set_byte(x: u64, byte: u8, index: usize) -> u64 {
+        x | ((byte as u64) << (index << 3))
     }
 
-    fn read_bytes(buffer: &[u8], index: usize) -> Result<u8, &'static str> {
-        if index + 1 > buffer.len() {
-            return Result::Err("Not enough readable bytes")
-        }
+    fn read_byte(x: u64, index: usize) -> u8 {
+        (x >> (index << 3)) as u8
+    }
 
-        let mut result = 0u8;
-        for i in 0..1 {
-            let next_byte = buffer[index + i] as u8;
+    fn zero() -> u64 {
+        0
+    }
+}
 
-            result |= next_byte << (i << 3);
-        }
+impl Number<u8> for u8 {
+    fn set_byte(x: u8, byte: u8, index: usize) -> u8 {
+        byte
+    }
 
-        Result::Ok(result)
+    fn read_byte(x: u8, index: usize) -> u8 {
+        x
+    }
+
+    fn zero() -> u8 {
+        0
     }
 }
 
@@ -512,6 +494,34 @@ mod tests {
     use std::fs;
     use std::fs::File;
     use std::io::Read;
+
+    #[test]
+    fn test_write_number() {
+        let mut vec = vec![0;5];
+        write_number(43u32, &mut vec, 1).expect("Should not fail");
+
+        assert_eq!(vec, [0, 43, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_write_number_with_overflow() {
+        let mut vec = vec![0;5];
+        assert!(write_number(43u32, &mut vec, 2).is_err());
+    }
+
+    #[test]
+    fn test_read_number() {
+        let vec = vec![0, 43, 0, 0, 0];
+        let num = read_number::<u32>(&vec, 1).expect("Should read");
+
+        assert_eq!(num, 43u32);
+    }
+
+    #[test]
+    fn test_read_number_with_underflow() {
+        let vec = vec![0, 43, 0, 0];
+        assert!(read_number::<u32>(&vec, 1).is_err());
+    }
 
     fn write_messages_to_segment(path: &Path, buffer_size: usize, messages: &[&[u8]]) -> (Vec<u8>, SegmentInfo) {
         fs::remove_file(&path);
@@ -536,7 +546,7 @@ mod tests {
     }
 
     fn validate_full_message(segment_bytes: &[u8], message: &[u8], offset: usize) {
-        assert_eq!(u32::read_bytes(segment_bytes, offset + LEN_OFFSET).unwrap(), message.len() as u32);
+        assert_eq!(read_number::<u32>(segment_bytes, offset + LEN_OFFSET).unwrap(), message.len() as u32);
         assert_eq!(segment_bytes[offset + TYPE_OFFSET], ChunkType::Full as u8);
         assert_eq!(message, &segment_bytes[(offset + PAYLOAD_OFFSET)..(offset + PAYLOAD_OFFSET + message.len())]);
     }
@@ -563,11 +573,11 @@ mod tests {
         let (segment_bytes, _) = write_messages_to_segment(&path, 16, &[&message]);
         assert_eq!(segment_bytes.len(), 32);
 
-        assert_eq!(u32::read_bytes(&segment_bytes, LEN_OFFSET).unwrap(), 7);
+        assert_eq!(read_number::<u32>(&segment_bytes, LEN_OFFSET).unwrap(), 7);
         assert_eq!(segment_bytes[TYPE_OFFSET], ChunkType::Start as u8);
         assert_eq!(message[0..7], segment_bytes[PAYLOAD_OFFSET..(PAYLOAD_OFFSET + 7)]);
 
-        assert_eq!(u32::read_bytes(&segment_bytes, 16 + LEN_OFFSET).unwrap(), 1);
+        assert_eq!(read_number::<u32>(&segment_bytes, 16 + LEN_OFFSET).unwrap(), 1);
         assert_eq!(segment_bytes[16 + TYPE_OFFSET], ChunkType::End as u8);
         assert_eq!(message[7], segment_bytes[16 + PAYLOAD_OFFSET]);
     }
@@ -585,7 +595,7 @@ mod tests {
 
         // Seconday message
         let secondary_message_offset = initial_message.len() + NUM_HEADER_BYTES;
-        assert_eq!(u32::read_bytes(&segment_bytes, secondary_message_offset + LEN_OFFSET).unwrap(), seconday_message.len() as u32);
+        assert_eq!(read_number::<u32>(&segment_bytes, secondary_message_offset + LEN_OFFSET).unwrap(), seconday_message.len() as u32);
         assert_eq!(segment_bytes[secondary_message_offset + TYPE_OFFSET], ChunkType::Full as u8);
         let actual_secondary_message = &segment_bytes[secondary_message_offset + PAYLOAD_OFFSET..(secondary_message_offset + PAYLOAD_OFFSET + seconday_message.len())];
         assert_eq!(&seconday_message[0..seconday_message.len()], actual_secondary_message);
@@ -604,14 +614,14 @@ mod tests {
 
         // Secondary message head
         let head_offset = initial_message.len() + NUM_HEADER_BYTES;
-        assert_eq!(u32::read_bytes(&segment_bytes, head_offset + LEN_OFFSET).unwrap(), 13);
+        assert_eq!(read_number::<u32>(&segment_bytes, head_offset + LEN_OFFSET).unwrap(), 13);
         assert_eq!(segment_bytes[head_offset + TYPE_OFFSET], ChunkType::Start as u8);
         let actual_secondary_message = &segment_bytes[(head_offset + PAYLOAD_OFFSET)..(head_offset + PAYLOAD_OFFSET + 13)];
         assert_eq!(&seconday_message[0..13], actual_secondary_message);
 
         // Seconday message tail
         let tail_offset = 32;
-        assert_eq!(u32::read_bytes(&segment_bytes, tail_offset + LEN_OFFSET).unwrap(), 1);
+        assert_eq!(read_number::<u32>(&segment_bytes, tail_offset + LEN_OFFSET).unwrap(), 1);
         assert_eq!(segment_bytes[tail_offset + TYPE_OFFSET], ChunkType::End as u8);
         let actual_secondary_message = &segment_bytes[tail_offset + PAYLOAD_OFFSET..(tail_offset + PAYLOAD_OFFSET + 1)];
         assert_eq!(&seconday_message[13..14], actual_secondary_message);
@@ -630,7 +640,7 @@ mod tests {
 
         // Seconday message
         let secondary_message_offset = 16;
-        assert_eq!(u32::read_bytes(&segment_bytes, secondary_message_offset + LEN_OFFSET).unwrap(), seconday_message.len() as u32);
+        assert_eq!(read_number::<u32>(&segment_bytes, secondary_message_offset + LEN_OFFSET).unwrap(), seconday_message.len() as u32);
         assert_eq!(segment_bytes[secondary_message_offset + TYPE_OFFSET], ChunkType::Full as u8);
         let actual_secondary_message = &segment_bytes[secondary_message_offset + PAYLOAD_OFFSET..(secondary_message_offset + PAYLOAD_OFFSET + seconday_message.len())];
         assert_eq!(&seconday_message[0..seconday_message.len()], actual_secondary_message);
